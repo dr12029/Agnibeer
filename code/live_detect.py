@@ -13,20 +13,25 @@ from flask import Flask, Response
 # ==========================================
 ESP32_IP = "192.168.0.203"  
 
-# Stream from Port 80
 STREAM_URL = f"http://{ESP32_IP}:200/stream"
-# WebSocket to Port 81
 WS_URL = f"ws://{ESP32_IP}:81/"
 
 app = Flask(__name__)
 
-# FIXED PATH: Points to the model inside the 'code' folder
 print("Loading Custom YOLO Model (code/best.pt)...")
 model = YOLO("code/best.pt") 
+
+# Read class mapping directly from your model to prevent ID mismatches
+class_names = model.names
+print(f"✅ Model loaded successfully. Detected Classes: {class_names}")
 
 fire_active = False
 human_active = False
 ws_app = None
+
+# Threading buffers to isolate network ingestion from AI processing
+latest_raw_frame = None
+frame_lock = threading.Lock()
 
 # ==========================================
 # 2. WEBSOCKET CONNECTION
@@ -39,19 +44,22 @@ def run_websocket():
     ws_app = websocket.WebSocketApp(WS_URL, on_open=on_open)
     ws_app.run_forever()
 
-# Start WebSocket in the background so it doesn't block the video
 threading.Thread(target=run_websocket, daemon=True).start()
 
 def send_alert(message):
+    global ws_app
     if ws_app and ws_app.sock and ws_app.sock.connected:
+        print(f"📡 Transmitting to Dashboard: {message}")
         ws_app.send(message)
+    else:
+        print(f"⚠️ WS Disconnected! Cannot send: {message}")
 
 # ==========================================
-# 3. ROBUST STREAMING & AI RELAY
+# 3. HIGH-SPEED BG NETWORK THREAD
+# Consumes frames at maximum Wi-Fi speed to prevent hardware lag
 # ==========================================
-def generate_frames():
-    global fire_active, human_active
-    
+def network_stream_fetcher():
+    global latest_raw_frame
     while True:
         print(f"Opening HTTP Stream at {STREAM_URL}...")
         try:
@@ -62,7 +70,6 @@ def generate_frames():
             for chunk in response.iter_content(chunk_size=4096):
                 byte_buffer += chunk
                 
-                # Search for JPEG Start and End markers
                 a = byte_buffer.find(b'\xff\xd8')
                 b = byte_buffer.find(b'\xff\xd9')
                 
@@ -72,77 +79,103 @@ def generate_frames():
                         byte_buffer = byte_buffer[b+2:] 
                         
                         frame = cv2.imdecode(np.frombuffer(jpg_data, dtype=np.uint8), cv2.IMREAD_COLOR)
-                        
                         if frame is not None:
-                            # Run Custom YOLO
-                            results = model(frame, stream=True, verbose=False)
-                            
-                            current_fire = False
-                            current_human = False
-                            
-                            # Your custom bounding box drawing logic
-                            for r in results:
-                                for box in r.boxes:
-                                    x1, y1, x2, y2 = map(int, box.xyxy[0])
-                                    cls_id = int(box.cls[0])
-                                    conf = float(box.conf[0])
-
-                                    if conf > 0.50: # 50% Confidence threshold
-                                        if cls_id == 0:  
-                                            current_fire = True
-                                            label = f"FIRE! {conf:.2f}"
-                                            color = (0, 0, 255) 
-                                        elif cls_id == 1: 
-                                            current_human = True
-                                            label = f"Person {conf:.2f}"
-                                            color = (0, 255, 0) 
-                                        else:
-                                            label = f"Unknown {conf:.2f}"
-                                            color = (255, 255, 0)
-
-                                        cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
-                                        cv2.putText(frame, label, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
-
-                            # Trigger Alerts over WebSocket to ESP32
-                            if current_fire and not fire_active:
-                                send_alert("CMD:ML_FIRE")
-                                fire_active = True
-                            elif not current_fire and fire_active:
-                                send_alert("CMD:ML_FIRE_CLEAR")
-                                fire_active = False
-
-                            if current_human and not human_active:
-                                send_alert("CMD:ML_HUMAN")
-                                human_active = True
-                            elif not current_human and human_active:
-                                send_alert("CMD:ML_HUMAN_CLEAR")
-                                human_active = False
-
-                            # Convert annotated frame back to JPEG bytes to send to Dashboard
-                            ret, buffer = cv2.imencode('.jpg', frame)
-                            frame_bytes = buffer.tobytes()
-                            
-                            yield (b'--frame\r\n'
-                                   b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
+                            # Safely save to shared buffer without blocking
+                            with frame_lock:
+                                latest_raw_frame = frame
                     else:
                         byte_buffer = byte_buffer[a:]
-
         except Exception as e:
             print(f"Stream error/disconnected: {e}. Retrying in 2 seconds...")
             time.sleep(2)
 
+# Launch the stream fetcher immediately as a background service
+threading.Thread(target=network_stream_fetcher, daemon=True).start()
+
 # ==========================================
-# 4. LOCAL FLASK SERVER
+# 4. ROBUST AI GENERATOR LOOP
+# Runs at the pace of your CPU/GPU, completely detached from network speed
+# ==========================================
+def generate_frames():
+    global fire_active, human_active, latest_raw_frame
+    
+    while True:
+        # Check if a frame is available from the background network thread
+        with frame_lock:
+            if latest_raw_frame is None:
+                frame = None
+            else:
+                frame = latest_raw_frame.copy()
+        
+        if frame is None:
+            time.sleep(0.01) # Sleep briefly to prevent high CPU utilization while waiting
+            continue
+
+        # Run Custom YOLO
+        results = model(frame, stream=True, verbose=False)
+        
+        current_fire = False
+        current_human = False
+        
+        for r in results:
+            for box in r.boxes:
+                x1, y1, x2, y2 = map(int, box.xyxy[0])
+                cls_id = int(box.cls[0])
+                conf = float(box.conf[0])
+
+                if conf > 0.45: # 45% Confidence threshold
+                    # Robust Name-String Matching instead of relying on Class IDs
+                    class_label = class_names[cls_id].lower()
+
+                    if "fire" in class_label or "flame" in class_label:  
+                        current_fire = True
+                        label = f"FIRE! {conf:.2f}"
+                        color = (0, 0, 255) 
+                    elif "person" in class_label or "human" in class_label: 
+                        current_human = True
+                        label = f"Person {conf:.2f}"
+                        color = (0, 255, 0) 
+                    else:
+                        label = f"{class_names[cls_id]} {conf:.2f}"
+                        color = (255, 255, 0)
+
+                    cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+                    cv2.putText(frame, label, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+
+        # Trigger Alerts over WebSocket to ESP32
+        if current_fire and not fire_active:
+            send_alert("ALERT:FIRE")
+            fire_active = True
+        elif not current_fire and fire_active:
+            send_alert("CLEAR:FIRE")
+            fire_active = False
+
+        if current_human and not human_active:
+            send_alert("ALERT:HUMAN")
+            human_active = True
+        elif not current_human and human_active:
+            send_alert("CLEAR:HUMAN")
+            human_active = False
+
+        # Convert annotated frame back to JPEG bytes to send to Dashboard
+        ret, buffer = cv2.imencode('.jpg', frame)
+        frame_bytes = buffer.tobytes()
+        
+        yield (b'--frame\r\n'
+               b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
+               
+        # Give the CPU breathing room (~30 FPS max tracking speed)
+        time.sleep(0.03)
+
+# ==========================================
+# 5. LOCAL FLASK SERVER
 # ==========================================
 @app.route('/video_feed')
 def video_feed():
-    # This serves the annotated video to your HTML Dashboard
     return Response(generate_frames(), mimetype='multipart/x-mixed-replace; boundary=frame')
 
 if __name__ == '__main__':
     print("🚀 Starting AI Video Relay on Port 5000...")
-    print("Go to your ESP32 IP in the browser to view the Dashboard!")
-    # Disable standard logging to keep terminal clean
     import logging
     log = logging.getLogger('werkzeug')
     log.setLevel(logging.ERROR)
