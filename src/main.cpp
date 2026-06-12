@@ -12,11 +12,10 @@ const char* password = "abds@EEE_22";
 
 // Set your Static IP address
 IPAddress local_IP(192, 168, 0, 203);
-// Set your Gateway IP address (Usually your router's IP)
 IPAddress gateway(192, 168, 0, 1);
 IPAddress subnet(255, 255, 255, 0);
-IPAddress primaryDNS(8, 8, 8, 8);   // Google DNS (optional)
-IPAddress secondaryDNS(8, 8, 4, 4); // Google DNS (optional)
+IPAddress primaryDNS(8, 8, 8, 8);   
+IPAddress secondaryDNS(8, 8, 4, 4); 
 
 // ===========================
 // 2. HARDWARE PINS
@@ -39,11 +38,11 @@ IPAddress secondaryDNS(8, 8, 4, 4); // Google DNS (optional)
 #define HREF_GPIO_NUM  7
 #define PCLK_GPIO_NUM  13
 
-// Ultrasonic Sensor Pins
-#define TRIG1 14   // Keep these away from the camera pins
-#define ECHO1 21  // Remember the 10k/20k Voltage Divider!
-#define TRIG2 38
-#define ECHO2 47
+// Ultrasonic Sensor Pins (COMMENTED OUT FOR MOTOR TEST)
+// #define TRIG1 14   
+// #define ECHO1 21  
+// #define TRIG2 38
+// #define ECHO2 47
 
 // ===========================
 // Global Servers & Timers
@@ -51,9 +50,9 @@ IPAddress secondaryDNS(8, 8, 4, 4); // Google DNS (optional)
 httpd_handle_t camera_httpd = NULL;
 WebSocketsServer webSocket = WebSocketsServer(81); 
 
-unsigned long lastPingTime = 0;
-const int pingInterval = 100; // Check distance every 100ms
-bool obstacleDetected = false;
+// unsigned long lastPingTime = 0;
+// const int pingInterval = 100; 
+// bool obstacleDetected = false;
 
 #define PART_BOUNDARY "123456789000000000000987654321"
 static const char* _STREAM_CONTENT_TYPE = "multipart/x-mixed-replace;boundary=" PART_BOUNDARY;
@@ -69,7 +68,7 @@ const char index_html[] PROGMEM = R"rawliteral(
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Rover Command</title>
+    <title>Rover Motor Test</title>
     <style>
         :root { --bg-color: #121212; --panel-bg: #1e1e1e; --text-main: #ffffff; --text-muted: #aaaaaa; --accent: #007bff; --danger: #ff4444; --success: #00C851; --warning: #ffbb33; }
         body { background-color: var(--bg-color); color: var(--text-main); font-family: 'Segoe UI', sans-serif; margin: 0; padding: 20px; display: flex; flex-direction: column; align-items: center; }
@@ -82,7 +81,7 @@ const char index_html[] PROGMEM = R"rawliteral(
         .panel { background-color: var(--panel-bg); border-radius: 8px; padding: 15px; border: 1px solid #333; }
         .panel h2 { margin-top: 0; font-size: 1.1rem; color: var(--text-muted); border-bottom: 1px solid #333; padding-bottom: 8px; margin-bottom: 15px; text-transform: uppercase; }
         .video-container { width: 100%; aspect-ratio: 4/3; background-color: #000; border-radius: 6px; overflow: hidden; display: flex; justify-content: center; align-items: center; border: 1px solid #444; }
-        #camera-stream { width: 100%; height: 100%; object-fit: cover; }
+        #camera-stream { width: 100%; height: 100%; object-fit: cover; transform: rotate(90deg); }
         .sensor-row { display: flex; justify-content: space-between; background-color: #2a2a2a; padding: 10px; border-radius: 4px; margin-bottom: 10px; font-size: 1rem; }
         .status-badge { font-weight: bold; color: var(--success); }
         .status-badge.alert { color: var(--danger); animation: blink 1s infinite; }
@@ -96,30 +95,25 @@ const char index_html[] PROGMEM = R"rawliteral(
 </head>
 <body>
     <div class="header">
-        <h1>Rover Command Center</h1>
+        <h1>Rover Motor Command Center</h1>
         <div class="status-indicator"><div class="dot" id="ws-dot"></div><span id="ws-status">Disconnected</span></div>
     </div>
     <div class="dashboard-grid">
         <div class="column">
             <div class="panel">
-                <h2>Live Feed (Edge ML)</h2>
+                <h2>Live Feed (Direct ESP32 Stream)</h2>
                 <div class="video-container"><img id="camera-stream" alt="Waiting for stream..." src=""></div>
             </div>
             <div class="panel">
-                <h2>AI Telemetry</h2>
-                <div class="sensor-row"><span>Fire Detection (YOLO):</span><span id="fire-val" class="status-badge">CLEAR</span></div>
-                <div class="sensor-row"><span>Human Detection (YOLO):</span><span id="human-val" class="status-badge">CLEAR</span></div>
-                <div class="sensor-row"><span>Gas Level (MQ-2):</span><strong id="gas-val">--</strong></div>
-                <div class="sensor-row"><span>Hardware Fire Array:</span><span id="flame-val" class="status-badge">CLEAR</span></div>
-                <div class="sensor-row"><span>Sonar Obstacle:</span><span id="sonar-val" class="status-badge">CLEAR</span></div>
+                <h2>Telemetry (Disabled for test)</h2>
+                <p style="color: #888;">Sensors are disconnected for the motor UART test.</p>
             </div>
         </div>
         <div class="column">
             <div class="panel">
                 <h2>Navigation Controls</h2>
-                <p style="color: #888; font-family: monospace;">[W] [A] [S] [D] to Drive</p>
+                <p style="color: #888; font-family: monospace;">[W] [A] [S] [D] to Drive (Press and Hold)</p>
                 <p style="color: #888; font-family: monospace;">[P] Toggle Water Pump</p>
-                <p id="collision-warn" style="color: var(--danger); display: none; font-weight: bold;">⚠️ COLLISION OVERRIDE ACTIVE</p>
             </div>
         </div>
         <div class="column">
@@ -136,8 +130,8 @@ const char index_html[] PROGMEM = R"rawliteral(
         
         window.onload = () => {
             const streamImg = document.getElementById('camera-stream');
-            // Pulling video from the laptop's Python Flask server
-            streamImg.src = "http://127.0.0.1:5000/video_feed"; 
+            // Pulling video directly from ESP32 for the hardware test
+            streamImg.src = "/stream"; 
             addLog("System initialized. Waiting for connection...");
             initWebSocket();
         };
@@ -163,7 +157,7 @@ const char index_html[] PROGMEM = R"rawliteral(
         // --- Keyboard Controls ---
         document.addEventListener('keydown', (e) => {
             const key = e.key.toLowerCase();
-            if (key === 'p') { sendCmd("P:ON"); return; } // Simplified Pump test
+            if (key === 'p') { sendCmd("P:ON"); return; } 
             
             if (activeKey === key || !['w', 'a', 's', 'd'].includes(key)) return; 
             activeKey = key;
@@ -176,43 +170,10 @@ const char index_html[] PROGMEM = R"rawliteral(
             if (['w', 'a', 's', 'd'].includes(key)) { sendCmd('M:S'); if (activeKey === key) activeKey = null; }
         });
 
-        // --- Parsing Mixed Telemetry (Python + Arduino) ---
         function parseIncomingData(dataString) {
-            // Python AI Alerts
-            if (dataString === "ALERT:FIRE") {
-                document.getElementById('fire-val').innerText = "FIRE DETECTED!"; document.getElementById('fire-val').classList.add('alert');
-                addLog("CRITICAL: Python ML detected FIRE!", true);
-            } 
-            else if (dataString === "CLEAR:FIRE") {
-                document.getElementById('fire-val').innerText = "CLEAR"; document.getElementById('fire-val').classList.remove('alert');
-            }
-            else if (dataString === "ALERT:HUMAN") {
-                document.getElementById('human-val').innerText = "PERSON DETECTED"; document.getElementById('human-val').classList.add('warning');
-            }
-            else if (dataString === "CLEAR:HUMAN") {
-                document.getElementById('human-val').innerText = "CLEAR"; document.getElementById('human-val').classList.remove('warning');
-            }
-            // Ultrasonic Alerts
-            else if (dataString === "ALERT:SONAR") {
-                document.getElementById('sonar-val').innerText = "OBSTACLE"; document.getElementById('sonar-val').classList.add('warning');
-                document.getElementById('collision-warn').style.display = "block";
-            }
-            else if (dataString === "CLEAR:SONAR") {
-                document.getElementById('sonar-val').innerText = "CLEAR"; document.getElementById('sonar-val').classList.remove('warning');
-                document.getElementById('collision-warn').style.display = "none";
-            }
-            // Arduino Telemetry (GAS:145 | FLAME_SENSORS:[1,1,1])
-            else if (dataString.includes("GAS:")) {
-                try {
-                    const parts = dataString.split(" | ");
-                    document.getElementById('gas-val').innerText = parts[0].replace("GAS:", "").trim();
-                    const flameArrayStr = parts[1].replace("FLAME_SENSORS:", "").trim();
-                    if (flameArrayStr.includes("0")) {
-                        document.getElementById('flame-val').innerText = "FIRE DETECTED!"; document.getElementById('flame-val').classList.add('alert');
-                    } else {
-                        document.getElementById('flame-val').innerText = "CLEAR"; document.getElementById('flame-val').classList.remove('alert');
-                    }
-                } catch (e) {}
+            // Forwarding telemetry directly to log for this test
+            if (dataString.includes("GAS:")) {
+                addLog("Arduino Telemetry Received: " + dataString);
             }
         }
     </script>
@@ -256,10 +217,9 @@ static esp_err_t stream_handler(httpd_req_t *req) {
     return res;
 }
 
-// Replace your existing startServers function with this:
 void startServers(){
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
-    config.server_port = 200; // <--- CHANGED TO PORT 200
+    config.server_port = 200; 
 
     httpd_uri_t index_uri = { .uri = "/", .method = HTTP_GET, .handler = index_handler, .user_ctx = NULL };
     httpd_uri_t stream_uri = { .uri = "/stream", .method = HTTP_GET, .handler = stream_handler, .user_ctx = NULL };
@@ -271,8 +231,9 @@ void startServers(){
 }
 
 // ===========================
-// 5. ULTRASONIC SENSOR LOGIC
+// 5. ULTRASONIC SENSOR LOGIC (COMMENTED OUT)
 // ===========================
+/*
 long getDistance(int trigPin, int echoPin) {
     digitalWrite(trigPin, LOW);
     delayMicroseconds(2);
@@ -280,12 +241,12 @@ long getDistance(int trigPin, int echoPin) {
     delayMicroseconds(10);
     digitalWrite(trigPin, LOW);
     
-    // Timeout set to 30000us (approx 5 meters) to prevent hanging
     long duration = pulseIn(echoPin, HIGH, 30000); 
-    if (duration == 0) return 999; // No echo received
+    if (duration == 0) return 999; 
     
-    return duration * 0.034 / 2; // Convert to cm
+    return duration * 0.034 / 2; 
 }
+*/
 
 // ===========================
 // 6. WEBSOCKET ROUTER
@@ -294,27 +255,14 @@ void webSocketEvent(uint8_t num, WStype_t type, uint8_t * payload, size_t length
     if(type == WStype_TEXT) {
         String msg = String((char*)payload);
         
-        // --- Python ML Commands ---
-        if(msg == "CMD:ML_FIRE") {
-            webSocket.broadcastTXT("ALERT:FIRE"); 
-            Serial1.print("P:ON\n"); 
-        }
-        else if(msg == "CMD:ML_FIRE_CLEAR") {
-            webSocket.broadcastTXT("CLEAR:FIRE");
-            Serial1.print("P:OFF\n");
-        }
-        else if(msg == "CMD:ML_HUMAN") { webSocket.broadcastTXT("ALERT:HUMAN"); }
-        else if(msg == "CMD:ML_HUMAN_CLEAR") { webSocket.broadcastTXT("CLEAR:HUMAN"); }
+        // 1. Prove the ESP32 received the command from the browser
+        Serial.print("ESP32 Caught Web Command: ");
+        Serial.println(msg);
         
-        // --- Dashboard Manual Controls ---
-        // Forward WASD and manual pump controls directly to the Arduino
-        else if (msg.startsWith("M:") || msg.startsWith("P:")) {
-            // Prevent driving forward if obstacle detected
-            if (obstacleDetected && msg.startsWith("M:F")) {
-                Serial1.print("M:S\n"); // Force stop instead
-            } else {
-                Serial1.print(msg + "\n");
-            }
+        // 2. Forward to the Arduino
+        if (msg.startsWith("M:") || msg.startsWith("P:")) {
+            Serial.println(" -> Shooting down UART to Arduino...");
+            Serial1.print(msg + "\n");
         }
     }
 }
@@ -325,12 +273,12 @@ void webSocketEvent(uint8_t num, WStype_t type, uint8_t * payload, size_t length
 void setup() {
     Serial.begin(115200);
     
-    // START ARDUINO BRIDGE (TX=1, RX=2)
-    Serial1.begin(9600, SERIAL_8N1, 1, 2);
+    // START ARDUINO BRIDGE (TX=14, RX=21)
+    Serial1.begin(9600, SERIAL_8N1, 21, 14);
 
-    // Init Sonar Pins
-    pinMode(TRIG1, OUTPUT); pinMode(ECHO1, INPUT);
-    pinMode(TRIG2, OUTPUT); pinMode(ECHO2, INPUT);
+    // Init Sonar Pins (COMMENTED OUT)
+    // pinMode(TRIG1, OUTPUT); pinMode(ECHO1, INPUT);
+    // pinMode(TRIG2, OUTPUT); pinMode(ECHO2, INPUT);
 
     // Camera Init
     camera_config_t config;
@@ -369,44 +317,42 @@ void setup() {
     webSocket.begin();
     webSocket.onEvent(webSocketEvent);
 
-    // This is what I forgot to add!
     Serial.print("SUCCESS! System Ready. Open Dashboard at: http://");
     Serial.print(WiFi.localIP());
-    Serial.println(":200/"); // <--- Added the :200 port to the output
+    Serial.println(":200/"); 
 }
 
 void loop() {
-    webSocket.loop(); // Process incoming Dashboard/Python messages
+    webSocket.loop(); // Process incoming Dashboard messages
 
-    // 1. Process Arduino Telemetry
+    // 1. Process Arduino Telemetry (if you decide to plug sensors back in later)
     if (Serial1.available()) {
         String arduinoData = Serial1.readStringUntil('\n');
         arduinoData.trim();
         if (arduinoData.length() > 0) {
-            // Forward directly to the Dashboard UI
             webSocket.broadcastTXT(arduinoData);
         }
     }
 
-    // 2. Process Ultrasonic Sensors (Non-blocking)
+    // 2. Process Ultrasonic Sensors (COMMENTED OUT)
+    /*
     if (millis() - lastPingTime >= pingInterval) {
         lastPingTime = millis();
-        
         long dist1 = getDistance(TRIG1, ECHO1);
         long dist2 = getDistance(TRIG2, ECHO2);
         
-        // If an object is closer than 20cm
         if (dist1 < 20 || dist2 < 20) {
             if (!obstacleDetected) {
                 obstacleDetected = true;
-                Serial1.print("M:S\n"); // Immediately command Arduino to stop
-                webSocket.broadcastTXT("ALERT:SONAR"); // Warn Dashboard
+                Serial1.print("M:S\n"); 
+                webSocket.broadcastTXT("ALERT:SONAR"); 
             }
         } else {
             if (obstacleDetected) {
                 obstacleDetected = false;
-                webSocket.broadcastTXT("CLEAR:SONAR"); // Clear Dashboard Warning
+                webSocket.broadcastTXT("CLEAR:SONAR"); 
             }
         }
     }
+    */
 }
