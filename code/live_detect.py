@@ -1,5 +1,5 @@
 import cv2
-import requests
+import urllib.request
 import numpy as np
 from ultralytics import YOLO
 import sys
@@ -9,12 +9,12 @@ import websocket
 from flask import Flask, Response
 
 # ==========================================
-# 1. CONFIGURATION
+# 1. CONFIGURATION (AP MODE)
 # ==========================================
-ESP32_IP = "192.168.0.203"  
+ESP32_IP = "192.168.4.1"  
 
-STREAM_URL = f"http://{ESP32_IP}:200/stream"
-WS_URL = f"ws://{ESP32_IP}:81/"
+STREAM_URL = f"http://{ESP32_IP}:81/stream"
+WS_URL = f"ws://{ESP32_IP}:82/"
 
 app = Flask(__name__)
 
@@ -60,23 +60,24 @@ def send_alert(message):
 # ==========================================
 def network_stream_fetcher():
     global latest_raw_frame
+    bytes_buffer = b''
     while True:
         print(f"Opening HTTP Stream at {STREAM_URL}...")
         try:
-            response = requests.get(STREAM_URL, stream=True, timeout=5)
-            response.raise_for_status()
-            byte_buffer = bytes()
-
-            for chunk in response.iter_content(chunk_size=4096):
-                byte_buffer += chunk
+            stream = urllib.request.urlopen(STREAM_URL, timeout=5)
+            while True:
+                chunk = stream.read(4096)
+                if not chunk:
+                    break
+                bytes_buffer += chunk
                 
-                a = byte_buffer.find(b'\xff\xd8')
-                b = byte_buffer.find(b'\xff\xd9')
+                a = bytes_buffer.find(b'\xff\xd8')
+                b = bytes_buffer.find(b'\xff\xd9')
                 
                 if a != -1 and b != -1:
                     if a < b:
-                        jpg_data = byte_buffer[a:b+2]
-                        byte_buffer = byte_buffer[b+2:] 
+                        jpg_data = bytes_buffer[a:b+2]
+                        bytes_buffer = bytes_buffer[b+2:] 
                         
                         frame = cv2.imdecode(np.frombuffer(jpg_data, dtype=np.uint8), cv2.IMREAD_COLOR)
                         if frame is not None:
@@ -84,7 +85,7 @@ def network_stream_fetcher():
                             with frame_lock:
                                 latest_raw_frame = frame
                     else:
-                        byte_buffer = byte_buffer[a:]
+                        bytes_buffer = bytes_buffer[a:]
         except Exception as e:
             print(f"Stream error/disconnected: {e}. Retrying in 2 seconds...")
             time.sleep(2)
@@ -172,6 +173,7 @@ def generate_frames():
 # ==========================================
 @app.route('/video_feed')
 def video_feed():
+    # This serves the annotated video to your HTML Dashboard
     return Response(generate_frames(), mimetype='multipart/x-mixed-replace; boundary=frame')
 
 if __name__ == '__main__':
